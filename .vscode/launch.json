@@ -15,16 +15,7 @@
         "--reload"
       ],
       "jinja": true,
-      "justMyCode": false,
-      "python": "${workspaceFolder}/.venv/bin/python"
-    },
-    {
-      "name": "Python: Current File",
-      "type": "debugpy",
-      "request": "launch",
-      "program": "${file}",
-      "console": "integratedTerminal",
-      "justMyCode": false,
+      "justMyCode": true,
       "python": "${workspaceFolder}/.venv/bin/python"
     }
   ]
