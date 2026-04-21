@@ -25,13 +25,21 @@ from app.engine.common import (
 )
 from app.models.biz import ProductionTask
 from app.models.md import (
+    BOP,
+    BOPProcess,
     EquipmentFailureParam,
     OperationTransition,
-    BOP,
+    ProductionLine,
+    Stage,
     WIPBuffer,
 )
 from app.models.res import SimulationResult, SimulationStateSnapshot
 from app.models.sim import AnomalyInjection, SimulationPlan
+
+# Default changeover time inserted between consecutive tasks of different
+# product_code on the same line. Will be replaced by per-line configured
+# changeover data once that table is modeled.
+DEFAULT_CHANGEOVER_SEC = 300  # 5 minutes
 
 
 @dataclass
@@ -46,6 +54,7 @@ class DESMetrics:
     material_shortage_count: int = 0
     equipment_failure_count: int = 0
     equipment_downtime_seconds: float = 0.0
+    hourly_output: list[dict] = field(default_factory=list)  # [{hour, actual, plan, defect}]
 
 
 class ProductionLineSimulation:
@@ -60,6 +69,9 @@ class ProductionLineSimulation:
         failure_params: dict[str, tuple[float, float]],  # eq_id -> (mtbf_sec, mttr_sec)
         anomalies: list[AnomalyInjection],
         wip_buffers: dict[str, int],  # between operation pairs -> capacity
+        upstream_store: simpy.Store | None = None,
+        downstream_store: simpy.Store | None = None,
+        inbound_delay_sec: float = 0.0,
     ):
         self.env = env
         self.processes = processes
@@ -67,6 +79,9 @@ class ProductionLineSimulation:
         self.constraints = constraints
         self.anomalies = anomalies
         self.metrics = DESMetrics()
+        self.upstream_store = upstream_store
+        self.downstream_store = downstream_store
+        self.inbound_delay_sec = inbound_delay_sec
 
         # Create resources for each process (capacity = equipment count)
         self.resources: dict[str, simpy.Resource] = {}
@@ -155,20 +170,83 @@ class ProductionLineSimulation:
                     if transfer_time > 0 or wait_time > 0:
                         yield self.env.timeout(transfer_time + wait_time)
 
-        # Product completed successfully
-        self.metrics.total_output += 1
-        self._record_event(
-            self.processes[-1].equipment_ids[0] if self.processes[-1].equipment_ids else "output",
-            None, "PRODUCT_COMPLETE", product_id,
+        # Product finished this line's BOP — either hand off to next stage, or complete
+        last_eq = self.processes[-1].equipment_ids[0] if self.processes[-1].equipment_ids else "output"
+        if self.downstream_store is not None:
+            self._record_event(last_eq, None, "STAGE_HANDOFF", product_id)
+            yield self.downstream_store.put(product_id)
+        else:
+            self.metrics.total_output += 1
+            self._record_event(last_eq, None, "PRODUCT_COMPLETE", product_id)
+
+    def task_queue_runner(
+        self,
+        tasks: list[ProductionTask],
+        changeover_sec: float = DEFAULT_CHANGEOVER_SEC,
+    ):
+        """Run tasks on this line **sequentially** in production_sequence order.
+
+        Between two consecutive tasks with different product_code, insert a
+        changeover timeout during which no new products are fed. Products from
+        the current task still finish flowing through downstream operations
+        before the next task starts feeding.
+        """
+        prev_product_code: str | None = None
+        first_eq = (
+            self.processes[0].equipment_ids[0]
+            if self.processes and self.processes[0].equipment_ids
+            else "line"
         )
 
-    def task_generator(self, task_quantity: int, task_id: str):
-        """Feed products into the line one by one."""
-        for i in range(task_quantity):
-            product_id = f"{task_id}_unit_{i:05d}"
+        for task in tasks:
+            qty = (task.plan_quantity or 0) - (task.completed_qty or 0)
+            if qty <= 0:
+                continue
+
+            # Changeover if product_code changed
+            if (
+                prev_product_code is not None
+                and prev_product_code != task.product_code
+                and changeover_sec > 0
+            ):
+                self._record_event(
+                    first_eq, None, "CHANGEOVER_START", None,
+                    {
+                        "from_product": prev_product_code,
+                        "to_product": task.product_code,
+                        "duration_sec": changeover_sec,
+                    },
+                )
+                yield self.env.timeout(changeover_sec)
+                self._record_event(
+                    first_eq, None, "CHANGEOVER_END", None,
+                    {
+                        "from_product": prev_product_code,
+                        "to_product": task.product_code,
+                    },
+                )
+
+            # Feed all products of this task with a tiny stagger, then wait
+            # for all of them to finish (or scrap) before the next task feeds.
+            product_procs: list[simpy.Process] = []
+            for i in range(qty):
+                product_id = f"{task.task_id}_unit_{i:05d}"
+                product_procs.append(self.env.process(self.product_flow(product_id)))
+                yield self.env.timeout(0.001)
+
+            if product_procs:
+                yield self.env.all_of(product_procs)
+
+            prev_product_code = task.product_code
+
+    def stage_consumer(self):
+        """Daemon for non-entry stages: pull products from upstream stage store,
+        apply inter-stage transfer delay, then spawn product_flow through this line's BOP."""
+        while True:
+            product_id = yield self.upstream_store.get()
+            if self.inbound_delay_sec > 0:
+                yield self.env.timeout(self.inbound_delay_sec)
             self.env.process(self.product_flow(product_id))
-            # Small stagger to avoid all products starting at t=0
-            yield self.env.timeout(0.001)
 
     def _equipment_failure(self, proc: ResolvedProcess, eq_id: str,
                            mtbf_sec: float, mttr_sec: float):
@@ -228,6 +306,66 @@ class ProductionLineSimulation:
             self._record_event(anomaly.target_id, prim_path, "FAILURE_END", metadata={"anomaly": True})
 
 
+def _lookup_cross_stage_transition(
+    db: Session,
+    upstream_stage_id: str | None,
+    current_line_id: str,
+) -> float:
+    """Return transfer_time + mandatory_wait_time for upstream BoP's last op →
+    current BoP's first op, using existing OperationTransition rows. 0 if none."""
+    if upstream_stage_id is None:
+        return 0.0
+
+    current_bop = (
+        db.query(BOP)
+        .filter(BOP.line_id == current_line_id, BOP.is_active == True)  # noqa: E712
+        .first()
+    )
+    if not current_bop:
+        return 0.0
+    first_proc = (
+        db.query(BOPProcess)
+        .filter(BOPProcess.bop_id == current_bop.bop_id)
+        .order_by(BOPProcess.sequence.asc())
+        .first()
+    )
+    if not first_proc:
+        return 0.0
+
+    upstream_lines = (
+        db.query(ProductionLine.line_id)
+        .filter(ProductionLine.stage_id == upstream_stage_id, ProductionLine.status == "ACTIVE")
+        .all()
+    )
+    for (up_line_id,) in upstream_lines:
+        up_bop = (
+            db.query(BOP)
+            .filter(BOP.line_id == up_line_id, BOP.is_active == True)  # noqa: E712
+            .first()
+        )
+        if not up_bop:
+            continue
+        last_proc = (
+            db.query(BOPProcess)
+            .filter(BOPProcess.bop_id == up_bop.bop_id)
+            .order_by(BOPProcess.sequence.desc())
+            .first()
+        )
+        if not last_proc:
+            continue
+        tr = (
+            db.query(OperationTransition)
+            .filter(
+                OperationTransition.from_operation_id == last_proc.operation_id,
+                OperationTransition.to_operation_id == first_proc.operation_id,
+            )
+            .first()
+        )
+        if tr:
+            return float(tr.transfer_time) + float(tr.mandatory_wait_time)
+    return 0.0
+
+
 def run_des(db: Session, plan_id: str) -> DESMetrics:
     """Execute DES simulation for all production lines in the plan.
 
@@ -260,6 +398,29 @@ def run_des(db: Session, plan_id: str) -> DESMetrics:
     anomalies = db.query(AnomalyInjection).filter(AnomalyInjection.plan_id == plan_id).all()
 
     all_metrics = DESMetrics()
+
+    # Build stage topology from participating lines
+    line_stage_rows = (
+        db.query(ProductionLine.line_id, Stage.stage_id, Stage.sequence)
+        .join(Stage, Stage.stage_id == ProductionLine.stage_id)
+        .filter(ProductionLine.line_id.in_(list(tasks_by_line.keys())))
+        .all()
+        if tasks_by_line
+        else []
+    )
+    line_to_stage: dict[str, str] = {lid: sid for lid, sid, _ in line_stage_rows}
+    stage_seq_map: dict[str, int] = {sid: seq for _, sid, seq in line_stage_rows}
+    stage_ids_in_order = sorted(stage_seq_map.keys(), key=lambda sid: stage_seq_map[sid])
+    entry_stage_id = stage_ids_in_order[0] if stage_ids_in_order else None
+
+    # One env shared across the whole plan; inter-stage Stores for product handoff
+    env = simpy.Environment()
+    stage_stores: dict[tuple[str, str], simpy.Store] = {}
+    for i in range(len(stage_ids_in_order) - 1):
+        up, down = stage_ids_in_order[i], stage_ids_in_order[i + 1]
+        stage_stores[(up, down)] = simpy.Store(env)
+
+    sims: list[ProductionLineSimulation] = []
 
     for line_id, line_tasks in tasks_by_line.items():
         processes = load_resolved_processes(db, plan_id, line_id)
@@ -310,8 +471,23 @@ def run_des(db: Session, plan_id: str) -> DESMetrics:
             line_equipment_ids.update(proc.equipment_ids)
         line_anomalies = [a for a in anomalies if a.target_id in line_equipment_ids]
 
-        # Create SimPy environment and run
-        env = simpy.Environment()
+        # Resolve this line's stage position and attach upstream/downstream stores
+        stage_id = line_to_stage.get(line_id)
+        upstream_store: simpy.Store | None = None
+        downstream_store: simpy.Store | None = None
+        inbound_delay = 0.0
+        if stage_id is not None:
+            idx = stage_ids_in_order.index(stage_id)
+            if idx > 0:
+                upstream_store = stage_stores[(stage_ids_in_order[idx - 1], stage_id)]
+                inbound_delay = _lookup_cross_stage_transition(
+                    db,
+                    upstream_stage_id=stage_ids_in_order[idx - 1],
+                    current_line_id=line_id,
+                )
+            if idx < len(stage_ids_in_order) - 1:
+                downstream_store = stage_stores[(stage_id, stage_ids_in_order[idx + 1])]
+
         sim = ProductionLineSimulation(
             env=env,
             processes=processes,
@@ -320,18 +496,23 @@ def run_des(db: Session, plan_id: str) -> DESMetrics:
             failure_params=failure_params,
             anomalies=line_anomalies,
             wip_buffers=wip_buffers,
+            upstream_store=upstream_store,
+            downstream_store=downstream_store,
+            inbound_delay_sec=inbound_delay,
         )
+        sims.append(sim)
 
-        # Start task generators
-        for task in line_tasks:
-            qty = task.plan_quantity - (task.completed_qty or 0)
-            if qty > 0:
-                env.process(sim.task_generator(qty, task.task_id))
+        # Entry-stage lines feed from their own task queue; downstream lines consume from upstream store
+        if stage_id == entry_stage_id:
+            env.process(sim.task_queue_runner(line_tasks))
+        else:
+            env.process(sim.stage_consumer())
 
-        # Run simulation
-        env.run(until=duration_seconds)
+    # Run the whole-plant simulation once
+    env.run(until=duration_seconds)
 
-        # Aggregate metrics
+    # Aggregate metrics across all lines
+    for sim in sims:
         all_metrics.total_output += sim.metrics.total_output
         all_metrics.ng_count += sim.metrics.ng_count
         all_metrics.events.extend(sim.metrics.events)
@@ -360,12 +541,36 @@ def run_des(db: Session, plan_id: str) -> DESMetrics:
             all_metrics.equipment_busy_time[bottleneck_eq] / (duration_seconds), 4
         )
 
+    # Aggregate PRODUCT_COMPLETE and NG_DETECTED into hourly buckets for chart
+    hour_buckets: dict[int, dict[str, int]] = {}
+    for ev in all_metrics.events:
+        if ev.event_type not in ("PRODUCT_COMPLETE", "NG_DETECTED"):
+            continue
+        hr = int(ev.timestamp_ms // 3_600_000)
+        bucket = hour_buckets.setdefault(hr, {"actual": 0, "defect": 0})
+        if ev.event_type == "PRODUCT_COMPLETE":
+            bucket["actual"] += 1
+        else:
+            bucket["defect"] += 1
+    total_plan_qty = sum((t.plan_quantity or 0) for line_tasks in tasks_by_line.values() for t in line_tasks)
+    plan_per_hour = round(total_plan_qty / hours) if hours > 0 else 0
+    all_metrics.hourly_output = [
+        {
+            "hour": h,
+            "actual": hour_buckets.get(h, {}).get("actual", 0),
+            "defect": hour_buckets.get(h, {}).get("defect", 0),
+            "plan": plan_per_hour,
+        }
+        for h in range(int(hours))
+    ]
+
     # Write periodic snapshots (every 60 sim-seconds for chart data)
     snapshot_interval = 60  # seconds
     current_equipment_states: dict[str, str] = {}
-    for proc in processes:
-        for eq_id in proc.equipment_ids:
-            current_equipment_states[eq_id] = "IDLE"
+    for sim in sims:
+        for proc in sim.processes:
+            for eq_id in proc.equipment_ids:
+                current_equipment_states[eq_id] = "IDLE"
 
     event_idx = 0
     for t_sec in range(0, int(duration_seconds), snapshot_interval):

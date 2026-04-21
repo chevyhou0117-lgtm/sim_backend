@@ -7,14 +7,29 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
-from app.models.biz import ProductionTask
-from app.models.res import LineBalanceResult, SimulationResult, SimulationStateSnapshot
+from app.models.ai import AIAnalysisResult, ImprovementSuggestion
+from app.models.biz import (
+    DemandForecast,
+    InventorySnapshot,
+    MaterialSupply,
+    ProductionTask,
+    WIPBufferSnapshot,
+    WorkOrder,
+)
+from app.models.res import (
+    LineBalanceResult,
+    SMTCapacityPeriodResult,
+    SMTCapacityResult,
+    SimulationResult,
+    SimulationStateSnapshot,
+)
 from app.models.sim import (
     AnomalyInjection,
     ParameterOverride,
     SimulationPlan,
     SoftConstraintConfig,
 )
+from app.models.tpl import PlanVersion
 from app.schemas.sim import (
     AnomalyCreate,
     AnomalyOut,
@@ -22,13 +37,17 @@ from app.schemas.sim import (
     BatchIds,
     ConstraintOut,
     ConstraintSet,
+    InventorySnapshotOut,
+    MaterialSupplyOut,
     OverrideCreate,
     OverrideOut,
     PlanCreate,
     PlanOut,
     PlanUpdate,
+    TaskBulkReplace,
     TaskCreate,
     TaskOut,
+    WIPBufferSnapshotOut,
 )
 
 router = APIRouter(prefix="/plans", tags=["Simulation Plans"])
@@ -39,6 +58,68 @@ def _get_plan(db: Session, plan_id: str) -> SimulationPlan:
     if not plan:
         raise HTTPException(404, "Plan not found")
     return plan
+
+
+def _cascade_delete_plan(db: Session, plan: SimulationPlan) -> None:
+    """Delete a plan and all its downstream data (results, AI, business snapshots, versions).
+
+    FK columns don't declare ondelete=CASCADE, so we delete in topological order explicitly.
+    Does not commit — caller is responsible.
+    """
+    plan_id = plan.plan_id
+
+    # Result layer: find the SimulationResult first
+    result = db.query(SimulationResult).filter(SimulationResult.plan_id == plan_id).first()
+    if result:
+        result_id = result.result_id
+
+        # AI layer (depends on result)
+        ai = db.query(AIAnalysisResult).filter(AIAnalysisResult.result_id == result_id).first()
+        if ai:
+            db.query(ImprovementSuggestion).filter(
+                ImprovementSuggestion.ai_result_id == ai.ai_result_id
+            ).delete(synchronize_session=False)
+            db.delete(ai)
+
+        # SMT capacity (periods depend on smt_result)
+        smt = db.query(SMTCapacityResult).filter(SMTCapacityResult.result_id == result_id).first()
+        if smt:
+            db.query(SMTCapacityPeriodResult).filter(
+                SMTCapacityPeriodResult.smt_result_id == smt.smt_result_id
+            ).delete(synchronize_session=False)
+            db.delete(smt)
+
+        db.query(LineBalanceResult).filter(
+            LineBalanceResult.result_id == result_id
+        ).delete(synchronize_session=False)
+        db.query(SimulationStateSnapshot).filter(
+            SimulationStateSnapshot.result_id == result_id
+        ).delete(synchronize_session=False)
+        db.delete(result)
+
+    # Plan versions
+    db.query(PlanVersion).filter(PlanVersion.plan_id == plan_id).delete(synchronize_session=False)
+
+    # Business snapshots (tasks reference work_orders, so tasks first)
+    db.query(ProductionTask).filter(ProductionTask.plan_id == plan_id).delete(synchronize_session=False)
+    db.query(WorkOrder).filter(WorkOrder.plan_id == plan_id).delete(synchronize_session=False)
+    db.query(MaterialSupply).filter(MaterialSupply.plan_id == plan_id).delete(synchronize_session=False)
+    db.query(InventorySnapshot).filter(InventorySnapshot.plan_id == plan_id).delete(synchronize_session=False)
+    db.query(DemandForecast).filter(DemandForecast.plan_id == plan_id).delete(synchronize_session=False)
+    db.query(WIPBufferSnapshot).filter(WIPBufferSnapshot.plan_id == plan_id).delete(synchronize_session=False)
+
+    # Plan configuration
+    db.query(SoftConstraintConfig).filter(
+        SoftConstraintConfig.plan_id == plan_id
+    ).delete(synchronize_session=False)
+    db.query(ParameterOverride).filter(
+        ParameterOverride.plan_id == plan_id
+    ).delete(synchronize_session=False)
+    db.query(AnomalyInjection).filter(
+        AnomalyInjection.plan_id == plan_id
+    ).delete(synchronize_session=False)
+
+    db.delete(plan)
 
 
 # ---------------------------------------------------------------------------
@@ -89,9 +170,9 @@ def update_plan(plan_id: str, body: PlanUpdate, db: Session = Depends(get_db)):
 @router.delete("/{plan_id}", status_code=204)
 def delete_plan(plan_id: str, db: Session = Depends(get_db)):
     plan = _get_plan(db, plan_id)
-    if plan.status != "DRAFT":
-        raise HTTPException(400, "Can only delete DRAFT plans")
-    db.delete(plan)
+    if plan.status in ("RUNNING", "ARCHIVED"):
+        raise HTTPException(400, "Cannot delete running or archived plans")
+    _cascade_delete_plan(db, plan)
     db.commit()
 
 
@@ -174,6 +255,60 @@ def create_task(plan_id: str, body: TaskCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(t)
     return t
+
+
+@router.put("/{plan_id}/tasks", response_model=list[TaskOut])
+def replace_tasks(plan_id: str, body: TaskBulkReplace, db: Session = Depends(get_db)):
+    """Replace all tasks for a plan (used by 无工单模式 editor)."""
+    _get_plan(db, plan_id)
+    db.query(ProductionTask).filter(ProductionTask.plan_id == plan_id).delete(
+        synchronize_session=False
+    )
+    db.flush()
+    created: list[ProductionTask] = []
+    for t in body.tasks:
+        row = ProductionTask(plan_id=plan_id, **t.model_dump())
+        db.add(row)
+        created.append(row)
+    db.commit()
+    for row in created:
+        db.refresh(row)
+    created.sort(key=lambda r: r.production_sequence)
+    return created
+
+
+# ---------------------------------------------------------------------------
+# Business snapshots (read-only)
+# ---------------------------------------------------------------------------
+@router.get("/{plan_id}/material-supplies", response_model=list[MaterialSupplyOut])
+def list_material_supplies(plan_id: str, db: Session = Depends(get_db)):
+    _get_plan(db, plan_id)
+    return (
+        db.query(MaterialSupply)
+        .filter(MaterialSupply.plan_id == plan_id)
+        .order_by(MaterialSupply.arrival_sim_hour)
+        .all()
+    )
+
+
+@router.get("/{plan_id}/inventory-snapshots", response_model=list[InventorySnapshotOut])
+def list_inventory_snapshots(plan_id: str, db: Session = Depends(get_db)):
+    _get_plan(db, plan_id)
+    return (
+        db.query(InventorySnapshot)
+        .filter(InventorySnapshot.plan_id == plan_id)
+        .all()
+    )
+
+
+@router.get("/{plan_id}/wip-snapshots", response_model=list[WIPBufferSnapshotOut])
+def list_wip_snapshots(plan_id: str, db: Session = Depends(get_db)):
+    _get_plan(db, plan_id)
+    return (
+        db.query(WIPBufferSnapshot)
+        .filter(WIPBufferSnapshot.plan_id == plan_id)
+        .all()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -333,8 +468,8 @@ def batch_delete(body: BatchIds, db: Session = Depends(get_db)):
     count = 0
     for pid in body.plan_ids:
         plan = db.query(SimulationPlan).get(pid)
-        if plan and plan.status == "DRAFT":
-            db.delete(plan)
+        if plan and plan.status not in ("RUNNING", "ARCHIVED"):
+            _cascade_delete_plan(db, plan)
             count += 1
     db.commit()
     return {"deleted": count}

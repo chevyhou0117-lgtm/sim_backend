@@ -109,6 +109,10 @@ class TaskOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class TaskBulkReplace(BaseModel):
+    tasks: list[TaskCreate]
+
+
 # ---------------------------------------------------------------------------
 # AnomalyInjection
 # ---------------------------------------------------------------------------
@@ -197,6 +201,48 @@ class ExportRequest(BaseModel):
     format: str = "json"
     title: str | None = None
     language: str = "en"
+
+
+# ---------------------------------------------------------------------------
+# Business snapshots (plan-scoped)
+# ---------------------------------------------------------------------------
+class MaterialSupplyOut(BaseModel):
+    supply_id: str
+    plan_id: str
+    material_code: str
+    material_name: str | None = None
+    supply_quantity: Decimal
+    arrival_sim_hour: Decimal
+    target_warehouse_id: str
+    data_source: str
+
+    model_config = {"from_attributes": True}
+
+
+class InventorySnapshotOut(BaseModel):
+    snapshot_id: str
+    plan_id: str
+    warehouse_id: str
+    material_code: str
+    total_quantity: Decimal
+    available_quantity: Decimal
+    snapshot_time: datetime
+    data_source: str
+
+    model_config = {"from_attributes": True}
+
+
+class WIPBufferSnapshotOut(BaseModel):
+    wip_snapshot_id: str
+    plan_id: str
+    wip_id: str
+    material_code: str
+    current_quantity: Decimal
+    current_volume: Decimal
+    snapshot_time: datetime
+    data_source: str
+
+    model_config = {"from_attributes": True}
 
 
 # ---------------------------------------------------------------------------

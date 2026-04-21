@@ -68,6 +68,7 @@ class Stage(Base):
 
     factory = relationship("Factory", back_populates="stages")
     production_lines = relationship("ProductionLine", back_populates="stage")
+    operations = relationship("Operation", back_populates="stage")
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +92,6 @@ class ProductionLine(Base):
     __table_args__ = (UniqueConstraint("stage_id", "line_code"),)
 
     stage = relationship("Stage", back_populates="production_lines")
-    operations = relationship("Operation", back_populates="production_line")
     wip_buffers = relationship("WIPBuffer", back_populates="production_line")
     bops = relationship("BOP", back_populates="production_line")
 
@@ -103,7 +103,7 @@ class Operation(Base):
     __tablename__ = "md_operation"
 
     operation_id = Column(String(36), primary_key=True, default=_uuid)
-    line_id = Column(String(36), ForeignKey("md_production_line.line_id"), nullable=False)
+    stage_id = Column(String(36), ForeignKey("md_stage.stage_id"), nullable=False)
     operation_code = Column(String(50), nullable=False)
     operation_name = Column(String(200), nullable=False)
     sequence = Column(Integer, nullable=False)
@@ -114,9 +114,9 @@ class Operation(Base):
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
-    __table_args__ = (UniqueConstraint("line_id", "operation_code"),)
+    __table_args__ = (UniqueConstraint("stage_id", "operation_code"),)
 
-    production_line = relationship("ProductionLine", back_populates="operations")
+    stage = relationship("Stage", back_populates="operations")
     equipments = relationship("Equipment", back_populates="operation")
     staffing_configs = relationship("StaffingConfig", back_populates="operation")
 

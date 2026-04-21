@@ -46,7 +46,7 @@ class ProductionLineOut(BaseModel):
 
 class OperationOut(BaseModel):
     operation_id: str
-    line_id: str
+    stage_id: str
     operation_code: str
     operation_name: str
     sequence: int
@@ -109,3 +109,62 @@ class ProductOut(BaseModel):
     status: str
 
     model_config = {"from_attributes": True}
+
+
+class OperationTransitionOut(BaseModel):
+    transition_id: str
+    bop_id: str
+    from_operation_id: str
+    to_operation_id: str
+    transfer_time: Decimal
+    mandatory_wait_time: Decimal
+    transfer_mode: str | None = None
+    wait_reason: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class EquipmentFailureParamOut(BaseModel):
+    param_id: str
+    equipment_id: str
+    mtbf_hours: Decimal
+    mttr_minutes: Decimal
+    failure_distribution: str | None = None
+    data_source: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# Aggregated views for config page panels
+# ---------------------------------------------------------------------------
+class LineEquipmentConfigItem(BaseModel):
+    """Flattened equipment row joined with operation / line / stage info."""
+
+    equipment_id: str
+    equipment_code: str
+    equipment_name: str
+    equipment_type: str
+    manufacturer: str | None = None
+    model_no: str | None = None
+    standard_ct: Decimal | None = None
+    operation_id: str
+    operation_code: str
+    operation_name: str
+    operation_sequence: int
+    line_id: str
+    line_code: str
+    line_name: str
+    stage_id: str
+    stage_name: str
+
+
+class LineEquipmentConfigOut(BaseModel):
+    """Dedicated payload for the 产线设备配置 section on the plan config page."""
+
+    factory_id: str
+    line_count: int
+    operation_count: int
+    equipment_count: int
+    last_updated: datetime | None = None
+    items: list[LineEquipmentConfigItem]

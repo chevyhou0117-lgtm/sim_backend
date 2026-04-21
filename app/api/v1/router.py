@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.api.v1.bop import router as bop_router
 from app.api.v1.master_data import products_router, router as master_data_router
 from app.api.v1.plans import router as plans_router
 from app.api.v1.simulation import router as simulation_router
@@ -11,6 +12,7 @@ api_router = APIRouter()
 
 api_router.include_router(master_data_router)
 api_router.include_router(products_router)
+api_router.include_router(bop_router)
 api_router.include_router(plans_router)
 api_router.include_router(simulation_router)
 api_router.include_router(versions_router)

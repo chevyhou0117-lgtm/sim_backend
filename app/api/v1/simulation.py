@@ -57,6 +57,7 @@ def _execute_simulation(plan_id: str):
                 "des_ng_count": des_metrics.ng_count,
                 "des_event_count": len(des_metrics.events),
                 "des_duration_ms": int(float(plan.simulation_duration_hours) * 3600 * 1000),
+                "hourly_output": des_metrics.hourly_output,
             }
 
         result.computation_status = "SUCCESS"

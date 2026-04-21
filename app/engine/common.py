@@ -74,9 +74,14 @@ def resolve_ct_for_operation(
         for e in db.query(Equipment).filter(Equipment.operation_id == operation_id).all()
     ]
 
-    # Get operation's line_id for LINE-scope matching
-    op = db.query(Operation).get(operation_id)
-    line_id = op.line_id if op else None
+    # Operation no longer has line_id (now stage_id). Derive line_id via BOPProcess → BOP.
+    bop_row = (
+        db.query(BOP.line_id)
+        .join(BOPProcess, BOPProcess.bop_id == BOP.bop_id)
+        .filter(BOPProcess.operation_id == operation_id, BOP.is_active == True)  # noqa: E712
+        .first()
+    )
+    line_id = bop_row[0] if bop_row else None
 
     best_ct = None
     best_priority = 99  # lower = more specific

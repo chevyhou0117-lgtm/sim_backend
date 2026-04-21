@@ -1,8 +1,8 @@
-"""create all tables
+"""initial schema
 
-Revision ID: 9a59b8d94c73
+Revision ID: 7fcc7e56782b
 Revises: 
-Create Date: 2026-04-15 16:25:44.614322
+Create Date: 2026-04-20 17:31:40.342598
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = '9a59b8d94c73'
+revision: str = '7fcc7e56782b'
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -140,6 +140,22 @@ def upgrade() -> None:
     sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
     sa.ForeignKeyConstraint(['factory_id'], ['md_factory.factory_id'], ),
     sa.PrimaryKeyConstraint('template_id')
+    )
+    op.create_table('md_operation',
+    sa.Column('operation_id', sa.String(length=36), nullable=False),
+    sa.Column('stage_id', sa.String(length=36), nullable=False),
+    sa.Column('operation_code', sa.String(length=50), nullable=False),
+    sa.Column('operation_name', sa.String(length=200), nullable=False),
+    sa.Column('sequence', sa.Integer(), nullable=False),
+    sa.Column('operation_type', sa.String(length=50), nullable=True),
+    sa.Column('is_key_operation', sa.Boolean(), nullable=True),
+    sa.Column('status', sa.String(length=20), nullable=False),
+    sa.Column('creator_binding_id', sa.String(length=100), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.ForeignKeyConstraint(['stage_id'], ['md_stage.stage_id'], ),
+    sa.PrimaryKeyConstraint('operation_id'),
+    sa.UniqueConstraint('stage_id', 'operation_code')
     )
     op.create_table('md_production_line',
     sa.Column('line_id', sa.String(length=36), nullable=False),
@@ -276,21 +292,55 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['product_id'], ['md_product.product_id'], ),
     sa.PrimaryKeyConstraint('bop_id')
     )
-    op.create_table('md_operation',
+    op.create_table('md_equipment',
+    sa.Column('equipment_id', sa.String(length=36), nullable=False),
     sa.Column('operation_id', sa.String(length=36), nullable=False),
-    sa.Column('line_id', sa.String(length=36), nullable=False),
-    sa.Column('operation_code', sa.String(length=50), nullable=False),
-    sa.Column('operation_name', sa.String(length=200), nullable=False),
-    sa.Column('sequence', sa.Integer(), nullable=False),
-    sa.Column('operation_type', sa.String(length=50), nullable=True),
-    sa.Column('is_key_operation', sa.Boolean(), nullable=True),
+    sa.Column('equipment_code', sa.String(length=50), nullable=False),
+    sa.Column('equipment_name', sa.String(length=200), nullable=False),
+    sa.Column('equipment_type', sa.String(length=50), nullable=False),
+    sa.Column('manufacturer', sa.String(length=200), nullable=True),
+    sa.Column('model_no', sa.String(length=100), nullable=True),
+    sa.Column('standard_ct', sa.Numeric(precision=10, scale=3), nullable=True),
     sa.Column('status', sa.String(length=20), nullable=False),
+    sa.Column('sort_order', sa.Integer(), nullable=True),
     sa.Column('creator_binding_id', sa.String(length=100), nullable=True),
     sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.ForeignKeyConstraint(['operation_id'], ['md_operation.operation_id'], ),
+    sa.PrimaryKeyConstraint('equipment_id')
+    )
+    op.create_table('md_staffing_config',
+    sa.Column('staffing_id', sa.String(length=36), nullable=False),
+    sa.Column('operation_id', sa.String(length=36), nullable=False),
+    sa.Column('worker_type_id', sa.String(length=36), nullable=False),
+    sa.Column('worker_count', sa.Integer(), nullable=False),
+    sa.Column('ct_with_this_count', sa.Numeric(precision=10, scale=3), nullable=False),
+    sa.Column('is_standard', sa.Boolean(), nullable=False),
+    sa.Column('effective_date', sa.Date(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.ForeignKeyConstraint(['operation_id'], ['md_operation.operation_id'], ),
+    sa.ForeignKeyConstraint(['worker_type_id'], ['md_worker_type.worker_type_id'], ),
+    sa.PrimaryKeyConstraint('staffing_id')
+    )
+    op.create_table('md_wip_buffer',
+    sa.Column('wip_id', sa.String(length=36), nullable=False),
+    sa.Column('line_id', sa.String(length=36), nullable=False),
+    sa.Column('wip_code', sa.String(length=50), nullable=False),
+    sa.Column('wip_name', sa.String(length=200), nullable=False),
+    sa.Column('capacity_volume', sa.Numeric(precision=15, scale=3), nullable=False),
+    sa.Column('capacity_qty', sa.Integer(), nullable=True),
+    sa.Column('pre_operation_id', sa.String(length=36), nullable=True),
+    sa.Column('post_operation_id', sa.String(length=36), nullable=True),
+    sa.Column('location', sa.String(length=200), nullable=True),
+    sa.Column('creator_binding_id', sa.String(length=100), nullable=True),
+    sa.Column('status', sa.String(length=20), nullable=False),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
     sa.ForeignKeyConstraint(['line_id'], ['md_production_line.line_id'], ),
-    sa.PrimaryKeyConstraint('operation_id'),
-    sa.UniqueConstraint('line_id', 'operation_code')
+    sa.ForeignKeyConstraint(['post_operation_id'], ['md_operation.operation_id'], ),
+    sa.ForeignKeyConstraint(['pre_operation_id'], ['md_operation.operation_id'], ),
+    sa.PrimaryKeyConstraint('wip_id')
     )
     op.create_table('res_simulation_result',
     sa.Column('result_id', sa.String(length=36), nullable=False),
@@ -398,6 +448,20 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['wo_id'], ['biz_work_order.wo_id'], ),
     sa.PrimaryKeyConstraint('task_id')
     )
+    op.create_table('biz_wip_buffer_snapshot',
+    sa.Column('wip_snapshot_id', sa.String(length=36), nullable=False),
+    sa.Column('plan_id', sa.String(length=36), nullable=False),
+    sa.Column('wip_id', sa.String(length=36), nullable=False),
+    sa.Column('material_code', sa.String(length=50), nullable=False),
+    sa.Column('current_quantity', sa.Numeric(precision=15, scale=3), nullable=False),
+    sa.Column('current_volume', sa.Numeric(precision=15, scale=6), nullable=False),
+    sa.Column('snapshot_time', sa.DateTime(), nullable=False),
+    sa.Column('data_source', sa.String(length=30), nullable=False),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.ForeignKeyConstraint(['plan_id'], ['sim_simulation_plan.plan_id'], ),
+    sa.ForeignKeyConstraint(['wip_id'], ['md_wip_buffer.wip_id'], ),
+    sa.PrimaryKeyConstraint('wip_snapshot_id')
+    )
     op.create_table('md_bop_process',
     sa.Column('bop_process_id', sa.String(length=36), nullable=False),
     sa.Column('bop_id', sa.String(length=36), nullable=False),
@@ -419,22 +483,19 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('bop_process_id'),
     sa.UniqueConstraint('bop_id', 'sequence')
     )
-    op.create_table('md_equipment',
+    op.create_table('md_equipment_failure_param',
+    sa.Column('param_id', sa.String(length=36), nullable=False),
     sa.Column('equipment_id', sa.String(length=36), nullable=False),
-    sa.Column('operation_id', sa.String(length=36), nullable=False),
-    sa.Column('equipment_code', sa.String(length=50), nullable=False),
-    sa.Column('equipment_name', sa.String(length=200), nullable=False),
-    sa.Column('equipment_type', sa.String(length=50), nullable=False),
-    sa.Column('manufacturer', sa.String(length=200), nullable=True),
-    sa.Column('model_no', sa.String(length=100), nullable=True),
-    sa.Column('standard_ct', sa.Numeric(precision=10, scale=3), nullable=True),
-    sa.Column('status', sa.String(length=20), nullable=False),
-    sa.Column('sort_order', sa.Integer(), nullable=True),
-    sa.Column('creator_binding_id', sa.String(length=100), nullable=True),
+    sa.Column('mtbf_hours', sa.Numeric(precision=10, scale=2), nullable=False),
+    sa.Column('mttr_minutes', sa.Numeric(precision=10, scale=2), nullable=False),
+    sa.Column('failure_distribution', sa.String(length=20), nullable=True),
+    sa.Column('data_source', sa.String(length=100), nullable=True),
+    sa.Column('effective_date', sa.Date(), nullable=True),
     sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['operation_id'], ['md_operation.operation_id'], ),
-    sa.PrimaryKeyConstraint('equipment_id')
+    sa.ForeignKeyConstraint(['equipment_id'], ['md_equipment.equipment_id'], ),
+    sa.PrimaryKeyConstraint('param_id'),
+    sa.UniqueConstraint('equipment_id')
     )
     op.create_table('md_operation_transition',
     sa.Column('transition_id', sa.String(length=36), nullable=False),
@@ -451,39 +512,6 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['from_operation_id'], ['md_operation.operation_id'], ),
     sa.ForeignKeyConstraint(['to_operation_id'], ['md_operation.operation_id'], ),
     sa.PrimaryKeyConstraint('transition_id')
-    )
-    op.create_table('md_staffing_config',
-    sa.Column('staffing_id', sa.String(length=36), nullable=False),
-    sa.Column('operation_id', sa.String(length=36), nullable=False),
-    sa.Column('worker_type_id', sa.String(length=36), nullable=False),
-    sa.Column('worker_count', sa.Integer(), nullable=False),
-    sa.Column('ct_with_this_count', sa.Numeric(precision=10, scale=3), nullable=False),
-    sa.Column('is_standard', sa.Boolean(), nullable=False),
-    sa.Column('effective_date', sa.Date(), nullable=True),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['operation_id'], ['md_operation.operation_id'], ),
-    sa.ForeignKeyConstraint(['worker_type_id'], ['md_worker_type.worker_type_id'], ),
-    sa.PrimaryKeyConstraint('staffing_id')
-    )
-    op.create_table('md_wip_buffer',
-    sa.Column('wip_id', sa.String(length=36), nullable=False),
-    sa.Column('line_id', sa.String(length=36), nullable=False),
-    sa.Column('wip_code', sa.String(length=50), nullable=False),
-    sa.Column('wip_name', sa.String(length=200), nullable=False),
-    sa.Column('capacity_volume', sa.Numeric(precision=15, scale=3), nullable=False),
-    sa.Column('capacity_qty', sa.Integer(), nullable=True),
-    sa.Column('pre_operation_id', sa.String(length=36), nullable=True),
-    sa.Column('post_operation_id', sa.String(length=36), nullable=True),
-    sa.Column('location', sa.String(length=200), nullable=True),
-    sa.Column('creator_binding_id', sa.String(length=100), nullable=True),
-    sa.Column('status', sa.String(length=20), nullable=False),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['line_id'], ['md_production_line.line_id'], ),
-    sa.ForeignKeyConstraint(['post_operation_id'], ['md_operation.operation_id'], ),
-    sa.ForeignKeyConstraint(['pre_operation_id'], ['md_operation.operation_id'], ),
-    sa.PrimaryKeyConstraint('wip_id')
     )
     op.create_table('res_line_balance_result',
     sa.Column('lb_result_id', sa.String(length=36), nullable=False),
@@ -546,20 +574,6 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['ai_result_id'], ['ai_analysis_result.ai_result_id'], ),
     sa.PrimaryKeyConstraint('suggestion_id')
     )
-    op.create_table('biz_wip_buffer_snapshot',
-    sa.Column('wip_snapshot_id', sa.String(length=36), nullable=False),
-    sa.Column('plan_id', sa.String(length=36), nullable=False),
-    sa.Column('wip_id', sa.String(length=36), nullable=False),
-    sa.Column('material_code', sa.String(length=50), nullable=False),
-    sa.Column('current_quantity', sa.Numeric(precision=15, scale=3), nullable=False),
-    sa.Column('current_volume', sa.Numeric(precision=15, scale=6), nullable=False),
-    sa.Column('snapshot_time', sa.DateTime(), nullable=False),
-    sa.Column('data_source', sa.String(length=30), nullable=False),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['plan_id'], ['sim_simulation_plan.plan_id'], ),
-    sa.ForeignKeyConstraint(['wip_id'], ['md_wip_buffer.wip_id'], ),
-    sa.PrimaryKeyConstraint('wip_snapshot_id')
-    )
     op.create_table('md_bop_process_ng_type',
     sa.Column('id', sa.String(length=36), nullable=False),
     sa.Column('bop_process_id', sa.String(length=36), nullable=False),
@@ -582,20 +596,6 @@ def upgrade() -> None:
     sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
     sa.ForeignKeyConstraint(['bop_process_id'], ['md_bop_process.bop_process_id'], ),
     sa.PrimaryKeyConstraint('param_id')
-    )
-    op.create_table('md_equipment_failure_param',
-    sa.Column('param_id', sa.String(length=36), nullable=False),
-    sa.Column('equipment_id', sa.String(length=36), nullable=False),
-    sa.Column('mtbf_hours', sa.Numeric(precision=10, scale=2), nullable=False),
-    sa.Column('mttr_minutes', sa.Numeric(precision=10, scale=2), nullable=False),
-    sa.Column('failure_distribution', sa.String(length=20), nullable=True),
-    sa.Column('data_source', sa.String(length=100), nullable=True),
-    sa.Column('effective_date', sa.Date(), nullable=True),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['equipment_id'], ['md_equipment.equipment_id'], ),
-    sa.PrimaryKeyConstraint('param_id'),
-    sa.UniqueConstraint('equipment_id')
     )
     op.create_table('res_smt_capacity_period_result',
     sa.Column('period_result_id', sa.String(length=36), nullable=False),
@@ -621,19 +621,16 @@ def upgrade() -> None:
 def downgrade() -> None:
     # ### commands auto generated by Alembic - please adjust! ###
     op.drop_table('res_smt_capacity_period_result')
-    op.drop_table('md_equipment_failure_param')
     op.drop_table('md_bop_process_param')
     op.drop_table('md_bop_process_ng_type')
-    op.drop_table('biz_wip_buffer_snapshot')
     op.drop_table('ai_improvement_suggestion')
     op.drop_table('res_smt_capacity_result')
     op.drop_table('res_simulation_state_snapshot')
     op.drop_table('res_line_balance_result')
-    op.drop_table('md_wip_buffer')
-    op.drop_table('md_staffing_config')
     op.drop_table('md_operation_transition')
-    op.drop_table('md_equipment')
+    op.drop_table('md_equipment_failure_param')
     op.drop_table('md_bop_process')
+    op.drop_table('biz_wip_buffer_snapshot')
     op.drop_table('biz_production_task')
     op.drop_table('ai_analysis_result')
     op.drop_table('tpl_plan_version')
@@ -641,7 +638,9 @@ def downgrade() -> None:
     op.drop_table('sim_parameter_override')
     op.drop_table('sim_anomaly_injection')
     op.drop_table('res_simulation_result')
-    op.drop_table('md_operation')
+    op.drop_table('md_wip_buffer')
+    op.drop_table('md_staffing_config')
+    op.drop_table('md_equipment')
     op.drop_table('md_bop')
     op.drop_table('biz_work_order')
     op.drop_table('biz_material_supply')
@@ -650,6 +649,7 @@ def downgrade() -> None:
     op.drop_table('sim_simulation_plan')
     op.drop_table('md_shift')
     op.drop_table('md_production_line')
+    op.drop_table('md_operation')
     op.drop_table('tpl_parameter_template')
     op.drop_table('md_worker_type')
     op.drop_table('md_work_calendar')
